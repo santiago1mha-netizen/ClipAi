@@ -11,15 +11,38 @@ const ENV_WITH_DENO = {
   PATH: `/home/codespace/.deno/bin:${process.env.PATH}`,
 };
 
-// Base yt-dlp options to avoid bot detection
-const YT_DLP_BASE_OPTS = [
-  "--remote-components ejs:github",
-  "--extractor-args youtube:player_client=web,default",
-  "--no-check-certificates",
-  "--user-agent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'",
-  "--sleep-interval 1",
-  "--max-sleep-interval 3",
-].join(" ");
+// Invidious instances (public YouTube frontends that bypass bot detection)
+const INVIDIOUS_INSTANCES = [
+  "https://inv.nadeko.net",
+  "https://invidious.nerdvpn.de", 
+  "https://invidious.jing.rocks",
+  "https://yt.artemislena.eu",
+];
+
+// Check if cookies file exists
+const COOKIES_PATH = path.join(process.cwd(), "cookies.txt");
+
+async function getCookiesOpt(): Promise<string> {
+  try {
+    await fs.access(COOKIES_PATH);
+    return `--cookies "${COOKIES_PATH}"`;
+  } catch {
+    return "";
+  }
+}
+
+// Base yt-dlp options
+const getYtDlpOpts = async () => {
+  const cookiesOpt = await getCookiesOpt();
+  return [
+    "--remote-components ejs:github",
+    "--extractor-args youtube:player_client=ios,web",
+    "--no-check-certificates", 
+    "--no-warnings",
+    "--socket-timeout 30",
+    cookiesOpt,
+  ].filter(Boolean).join(" ");
+};
 
 export interface Subtitle {
   start: number;
@@ -52,45 +75,88 @@ export function extractVideoId(url: string): string | null {
 export async function downloadVideo(videoId: string, outputDir: string): Promise<{ videoPath: string; audioPath: string; title: string; duration: number }> {
   const videoPath = path.join(outputDir, `${videoId}.mp4`);
   const audioPath = path.join(outputDir, `${videoId}.mp3`);
+  const YT_DLP_OPTS = await getYtDlpOpts();
 
-  // Get video info first
+  let info: any = null;
+  let lastError = "";
+
+  // Try YouTube directly first
   try {
     const { stdout: infoJson } = await execAsync(
-      `yt-dlp ${YT_DLP_BASE_OPTS} --dump-json "https://www.youtube.com/watch?v=${videoId}"`,
+      `yt-dlp ${YT_DLP_OPTS} --dump-json "https://www.youtube.com/watch?v=${videoId}"`,
       { maxBuffer: 10 * 1024 * 1024, env: ENV_WITH_DENO }
     );
-    var info = JSON.parse(infoJson);
+    info = JSON.parse(infoJson);
   } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    
-    if (errorMsg.includes("not made this video available in your country")) {
-      throw new Error("Este vídeo não está disponível na sua região. Tente outro vídeo.");
+    lastError = error instanceof Error ? error.message : String(error);
+    console.log("YouTube direct failed, trying Invidious instances...");
+  }
+
+  // If YouTube fails, try Invidious instances
+  if (!info) {
+    for (const instance of INVIDIOUS_INSTANCES) {
+      try {
+        const { stdout: infoJson } = await execAsync(
+          `yt-dlp --no-warnings --dump-json "${instance}/watch?v=${videoId}"`,
+          { maxBuffer: 10 * 1024 * 1024, env: ENV_WITH_DENO }
+        );
+        info = JSON.parse(infoJson);
+        console.log(`Success with Invidious instance: ${instance}`);
+        break;
+      } catch (e) {
+        console.log(`Invidious instance ${instance} failed`);
+        continue;
+      }
     }
-    if (errorMsg.includes("Video unavailable") || errorMsg.includes("Private video")) {
+  }
+
+  if (!info) {
+    // Parse the original error for user-friendly message
+    if (lastError.includes("Sign in to confirm you're not a bot") || lastError.includes("confirm you're not a bot")) {
+      throw new Error("O YouTube está bloqueando requisições deste servidor (detecção de bot). Este é um problema comum em ambientes cloud como Gitpod. Para usar o app, você precisaria: 1) Rodar localmente no seu computador, ou 2) Fornecer cookies do YouTube via arquivo cookies.txt");
+    }
+    if (lastError.includes("not made this video available in your country")) {
+      throw new Error("Este vídeo não está disponível na região do servidor.");
+    }
+    if (lastError.includes("Video unavailable") || lastError.includes("Private video")) {
       throw new Error("Vídeo indisponível ou privado. Verifique o link.");
     }
-    if (errorMsg.includes("Sign in to confirm your age")) {
-      throw new Error("Este vídeo requer verificação de idade. Tente outro vídeo.");
+    if (lastError.includes("Sign in to confirm your age")) {
+      throw new Error("Este vídeo requer verificação de idade.");
     }
-    if (errorMsg.includes("Sign in to confirm you're not a bot") || errorMsg.includes("bot")) {
-      throw new Error("YouTube está pedindo verificação. Tente novamente em alguns minutos ou use outro vídeo.");
-    }
-    
-    throw new Error(`Erro ao obter informações do vídeo: ${errorMsg}`);
+    throw new Error(`Não foi possível obter informações do vídeo. Tente outro link.`);
   }
   
   const title = info.title || "Unknown";
   const duration = info.duration || 0;
 
-  // Download video (best quality up to 720p for processing speed)
+  // Download video - try direct URL from info if available, otherwise use yt-dlp
   try {
+    // Try to find a direct video URL from the info
+    const videoUrl = info.url || `https://www.youtube.com/watch?v=${videoId}`;
+    
     await execAsync(
-      `yt-dlp ${YT_DLP_BASE_OPTS} -f "bestvideo[height<=720]+bestaudio/best[height<=720]" --merge-output-format mp4 -o "${videoPath}" "https://www.youtube.com/watch?v=${videoId}"`,
+      `yt-dlp ${YT_DLP_OPTS} -f "bestvideo[height<=720]+bestaudio/best[height<=720]/best" --merge-output-format mp4 -o "${videoPath}" "${videoUrl}"`,
       { maxBuffer: 50 * 1024 * 1024, env: ENV_WITH_DENO }
     );
   } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    throw new Error(`Erro ao baixar vídeo: ${errorMsg}`);
+    // Try Invidious for download
+    let downloaded = false;
+    for (const instance of INVIDIOUS_INSTANCES) {
+      try {
+        await execAsync(
+          `yt-dlp --no-warnings -f "bestvideo[height<=720]+bestaudio/best[height<=720]/best" --merge-output-format mp4 -o "${videoPath}" "${instance}/watch?v=${videoId}"`,
+          { maxBuffer: 50 * 1024 * 1024, env: ENV_WITH_DENO }
+        );
+        downloaded = true;
+        break;
+      } catch (e) {
+        continue;
+      }
+    }
+    if (!downloaded) {
+      throw new Error(`Erro ao baixar vídeo. Tente outro link.`);
+    }
   }
 
   // Extract audio separately for TTS mixing
@@ -103,16 +169,31 @@ export async function downloadVideo(videoId: string, outputDir: string): Promise
 }
 
 export async function downloadSubtitles(videoId: string, outputDir: string): Promise<Subtitle[]> {
-  const subtitlePath = path.join(outputDir, `${videoId}.srt`);
+  const YT_DLP_OPTS = await getYtDlpOpts();
   
+  // Try YouTube directly
   try {
-    // Try to download existing subtitles (auto or manual)
     await execAsync(
-      `yt-dlp ${YT_DLP_BASE_OPTS} --write-auto-sub --write-sub --sub-lang pt,en --sub-format srt --skip-download -o "${path.join(outputDir, videoId)}" "https://www.youtube.com/watch?v=${videoId}"`,
+      `yt-dlp ${YT_DLP_OPTS} --write-auto-sub --write-sub --sub-lang pt,en --sub-format srt --skip-download -o "${path.join(outputDir, videoId)}" "https://www.youtube.com/watch?v=${videoId}"`,
       { maxBuffer: 10 * 1024 * 1024, env: ENV_WITH_DENO }
     );
+  } catch (error) {
+    // Try Invidious instances
+    for (const instance of INVIDIOUS_INSTANCES) {
+      try {
+        await execAsync(
+          `yt-dlp --no-warnings --write-auto-sub --write-sub --sub-lang pt,en --sub-format srt --skip-download -o "${path.join(outputDir, videoId)}" "${instance}/watch?v=${videoId}"`,
+          { maxBuffer: 10 * 1024 * 1024, env: ENV_WITH_DENO }
+        );
+        break;
+      } catch (e) {
+        continue;
+      }
+    }
+  }
 
-    // Find the subtitle file
+  // Find the subtitle file
+  try {
     const files = await fs.readdir(outputDir);
     const subFile = files.find(f => f.startsWith(videoId) && (f.endsWith(".srt") || f.endsWith(".vtt")));
     
