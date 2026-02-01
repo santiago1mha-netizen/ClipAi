@@ -1,9 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as path from "path";
 import * as fs from "fs/promises";
-import { generateNarration, getAudioDuration } from "@/lib/tts";
+import { generateNarration } from "@/lib/tts";
 import { generateShort, addSubtitlesToVideo } from "@/lib/video";
 import { Scene } from "@/lib/ai";
+
+// Increase timeout for video generation
+export const maxDuration = 300; // 5 minutes
 
 export async function POST(request: NextRequest) {
   try {

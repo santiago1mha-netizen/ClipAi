@@ -27,20 +27,36 @@ export default function Home() {
     e.preventDefault();
     if (!url.trim() || isProcessing) return;
 
+    // Helper to safely parse JSON response
+    const safeJsonParse = async (res: Response) => {
+      const text = await res.text();
+      try {
+        return JSON.parse(text);
+      } catch {
+        // If not JSON, it's likely a server error (Gateway Timeout, etc.)
+        if (text.includes("Gateway Timeout") || text.includes("504")) {
+          throw new Error("Servidor demorou muito para responder. O vídeo pode ser muito longo. Tente um vídeo mais curto.");
+        }
+        if (text.includes("502") || text.includes("Bad Gateway")) {
+          throw new Error("Erro no servidor. Tente novamente.");
+        }
+        throw new Error(text.substring(0, 200) || "Erro desconhecido no servidor");
+      }
+    };
+
     try {
       // Step 1: Extract video and subtitles
-      setProgress({ status: "extracting", message: "Baixando vídeo e extraindo legendas..." });
+      setProgress({ status: "extracting", message: "Baixando vídeo e extraindo legendas... (pode demorar alguns minutos)" });
       const extractRes = await fetch("/api/extract", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url }),
       });
       
+      const extractData = await safeJsonParse(extractRes);
       if (!extractRes.ok) {
-        const error = await extractRes.json();
-        throw new Error(error.error || "Erro na extração");
+        throw new Error(extractData.error || "Erro na extração");
       }
-      const extractData = await extractRes.json();
 
       // Step 2: Analyze and create script
       setProgress({ status: "analyzing", message: "IA analisando o filme e criando roteiro..." });
@@ -54,11 +70,10 @@ export default function Home() {
         }),
       });
       
+      const analyzeData = await safeJsonParse(analyzeRes);
       if (!analyzeRes.ok) {
-        const error = await analyzeRes.json();
-        throw new Error(error.error || "Erro na análise");
+        throw new Error(analyzeData.error || "Erro na análise");
       }
-      const analyzeData = await analyzeRes.json();
 
       // Step 3: Generate short video
       setProgress({ 
@@ -76,11 +91,10 @@ export default function Home() {
         }),
       });
       
+      const generateData = await safeJsonParse(generateRes);
       if (!generateRes.ok) {
-        const error = await generateRes.json();
-        throw new Error(error.error || "Erro na geração");
+        throw new Error(generateData.error || "Erro na geração");
       }
-      const generateData = await generateRes.json();
 
       setProgress({ 
         status: "done", 

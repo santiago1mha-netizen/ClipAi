@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { analyzeAndCreateScript } from "@/lib/ai";
 import { Subtitle } from "@/lib/youtube";
 
+// Increase timeout for AI analysis
+export const maxDuration = 120; // 2 minutes
+
 export async function POST(request: NextRequest) {
   try {
     const { videoId, subtitles, title } = await request.json();

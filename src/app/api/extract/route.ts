@@ -8,6 +8,9 @@ import {
   transcribeWithWhisper 
 } from "@/lib/youtube";
 
+// Increase timeout for long video downloads
+export const maxDuration = 300; // 5 minutes
+
 export async function POST(request: NextRequest) {
   try {
     const { url } = await request.json();
