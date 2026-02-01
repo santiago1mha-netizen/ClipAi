@@ -11,6 +11,16 @@ const ENV_WITH_DENO = {
   PATH: `/home/codespace/.deno/bin:${process.env.PATH}`,
 };
 
+// Base yt-dlp options to avoid bot detection
+const YT_DLP_BASE_OPTS = [
+  "--remote-components ejs:github",
+  "--extractor-args youtube:player_client=web,default",
+  "--no-check-certificates",
+  "--user-agent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'",
+  "--sleep-interval 1",
+  "--max-sleep-interval 3",
+].join(" ");
+
 export interface Subtitle {
   start: number;
   end: number;
@@ -46,7 +56,7 @@ export async function downloadVideo(videoId: string, outputDir: string): Promise
   // Get video info first
   try {
     const { stdout: infoJson } = await execAsync(
-      `yt-dlp --remote-components ejs:github --dump-json "https://www.youtube.com/watch?v=${videoId}"`,
+      `yt-dlp ${YT_DLP_BASE_OPTS} --dump-json "https://www.youtube.com/watch?v=${videoId}"`,
       { maxBuffer: 10 * 1024 * 1024, env: ENV_WITH_DENO }
     );
     var info = JSON.parse(infoJson);
@@ -62,6 +72,9 @@ export async function downloadVideo(videoId: string, outputDir: string): Promise
     if (errorMsg.includes("Sign in to confirm your age")) {
       throw new Error("Este vídeo requer verificação de idade. Tente outro vídeo.");
     }
+    if (errorMsg.includes("Sign in to confirm you're not a bot") || errorMsg.includes("bot")) {
+      throw new Error("YouTube está pedindo verificação. Tente novamente em alguns minutos ou use outro vídeo.");
+    }
     
     throw new Error(`Erro ao obter informações do vídeo: ${errorMsg}`);
   }
@@ -72,7 +85,7 @@ export async function downloadVideo(videoId: string, outputDir: string): Promise
   // Download video (best quality up to 720p for processing speed)
   try {
     await execAsync(
-      `yt-dlp --remote-components ejs:github -f "bestvideo[height<=720]+bestaudio/best[height<=720]" --merge-output-format mp4 -o "${videoPath}" "https://www.youtube.com/watch?v=${videoId}"`,
+      `yt-dlp ${YT_DLP_BASE_OPTS} -f "bestvideo[height<=720]+bestaudio/best[height<=720]" --merge-output-format mp4 -o "${videoPath}" "https://www.youtube.com/watch?v=${videoId}"`,
       { maxBuffer: 50 * 1024 * 1024, env: ENV_WITH_DENO }
     );
   } catch (error) {
@@ -95,7 +108,7 @@ export async function downloadSubtitles(videoId: string, outputDir: string): Pro
   try {
     // Try to download existing subtitles (auto or manual)
     await execAsync(
-      `yt-dlp --remote-components ejs:github --write-auto-sub --write-sub --sub-lang pt,en --sub-format srt --skip-download -o "${path.join(outputDir, videoId)}" "https://www.youtube.com/watch?v=${videoId}"`,
+      `yt-dlp ${YT_DLP_BASE_OPTS} --write-auto-sub --write-sub --sub-lang pt,en --sub-format srt --skip-download -o "${path.join(outputDir, videoId)}" "https://www.youtube.com/watch?v=${videoId}"`,
       { maxBuffer: 10 * 1024 * 1024, env: ENV_WITH_DENO }
     );
 
