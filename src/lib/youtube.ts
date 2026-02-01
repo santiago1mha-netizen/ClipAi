@@ -5,6 +5,12 @@ import * as path from "path";
 
 const execAsync = promisify(exec);
 
+// Ensure deno is in PATH for yt-dlp
+const ENV_WITH_DENO = {
+  ...process.env,
+  PATH: `/home/codespace/.deno/bin:${process.env.PATH}`,
+};
+
 export interface Subtitle {
   start: number;
   end: number;
@@ -38,19 +44,41 @@ export async function downloadVideo(videoId: string, outputDir: string): Promise
   const audioPath = path.join(outputDir, `${videoId}.mp3`);
 
   // Get video info first
-  const { stdout: infoJson } = await execAsync(
-    `yt-dlp --dump-json "https://www.youtube.com/watch?v=${videoId}"`,
-    { maxBuffer: 10 * 1024 * 1024 }
-  );
-  const info = JSON.parse(infoJson);
+  try {
+    const { stdout: infoJson } = await execAsync(
+      `yt-dlp --remote-components ejs:github --dump-json "https://www.youtube.com/watch?v=${videoId}"`,
+      { maxBuffer: 10 * 1024 * 1024, env: ENV_WITH_DENO }
+    );
+    var info = JSON.parse(infoJson);
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    
+    if (errorMsg.includes("not made this video available in your country")) {
+      throw new Error("Este vídeo não está disponível na sua região. Tente outro vídeo.");
+    }
+    if (errorMsg.includes("Video unavailable") || errorMsg.includes("Private video")) {
+      throw new Error("Vídeo indisponível ou privado. Verifique o link.");
+    }
+    if (errorMsg.includes("Sign in to confirm your age")) {
+      throw new Error("Este vídeo requer verificação de idade. Tente outro vídeo.");
+    }
+    
+    throw new Error(`Erro ao obter informações do vídeo: ${errorMsg}`);
+  }
+  
   const title = info.title || "Unknown";
   const duration = info.duration || 0;
 
   // Download video (best quality up to 720p for processing speed)
-  await execAsync(
-    `yt-dlp -f "bestvideo[height<=720]+bestaudio/best[height<=720]" --merge-output-format mp4 -o "${videoPath}" "https://www.youtube.com/watch?v=${videoId}"`,
-    { maxBuffer: 50 * 1024 * 1024 }
-  );
+  try {
+    await execAsync(
+      `yt-dlp --remote-components ejs:github -f "bestvideo[height<=720]+bestaudio/best[height<=720]" --merge-output-format mp4 -o "${videoPath}" "https://www.youtube.com/watch?v=${videoId}"`,
+      { maxBuffer: 50 * 1024 * 1024, env: ENV_WITH_DENO }
+    );
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Erro ao baixar vídeo: ${errorMsg}`);
+  }
 
   // Extract audio separately for TTS mixing
   await execAsync(
@@ -67,8 +95,8 @@ export async function downloadSubtitles(videoId: string, outputDir: string): Pro
   try {
     // Try to download existing subtitles (auto or manual)
     await execAsync(
-      `yt-dlp --write-auto-sub --write-sub --sub-lang pt,en --sub-format srt --skip-download -o "${path.join(outputDir, videoId)}" "https://www.youtube.com/watch?v=${videoId}"`,
-      { maxBuffer: 10 * 1024 * 1024 }
+      `yt-dlp --remote-components ejs:github --write-auto-sub --write-sub --sub-lang pt,en --sub-format srt --skip-download -o "${path.join(outputDir, videoId)}" "https://www.youtube.com/watch?v=${videoId}"`,
+      { maxBuffer: 10 * 1024 * 1024, env: ENV_WITH_DENO }
     );
 
     // Find the subtitle file
