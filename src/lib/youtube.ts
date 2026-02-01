@@ -19,28 +19,45 @@ const INVIDIOUS_INSTANCES = [
   "https://yt.artemislena.eu",
 ];
 
-// Check if cookies file exists
-const COOKIES_PATH = path.join(process.cwd(), "cookies.txt");
-
-async function getCookiesOpt(): Promise<string> {
-  try {
-    await fs.access(COOKIES_PATH);
-    return `--cookies "${COOKIES_PATH}"`;
-  } catch {
-    return "";
+// Check if cookies file exists - try multiple locations
+async function getCookiesPath(): Promise<string | null> {
+  const possiblePaths = [
+    path.join(process.cwd(), "cookies.txt"),
+    "/workspaces/workspaces/shorts-ai/cookies.txt",
+    path.resolve(__dirname, "../../cookies.txt"),
+    path.resolve(__dirname, "../../../cookies.txt"),
+  ];
+  
+  for (const p of possiblePaths) {
+    try {
+      await fs.access(p);
+      console.log(`Found cookies at: ${p}`);
+      return p;
+    } catch {
+      continue;
+    }
   }
+  console.log("No cookies.txt found");
+  return null;
 }
+
+
 
 // Base yt-dlp options
 const getYtDlpOpts = async () => {
-  const cookiesOpt = await getCookiesOpt();
+  const cookiesPath = await getCookiesPath();
+  const hasCookies = !!cookiesPath;
+  
+  // iOS client doesn't support cookies, so use web only when cookies are present
+  const playerClient = hasCookies ? "web" : "ios,web";
+  
   return [
     "--remote-components ejs:github",
-    "--extractor-args youtube:player_client=ios,web",
+    `--extractor-args youtube:player_client=${playerClient}`,
     "--no-check-certificates", 
     "--no-warnings",
     "--socket-timeout 30",
-    cookiesOpt,
+    hasCookies ? `--cookies "${cookiesPath}"` : "",
   ].filter(Boolean).join(" ");
 };
 
@@ -81,15 +98,19 @@ export async function downloadVideo(videoId: string, outputDir: string): Promise
   let lastError = "";
 
   // Try YouTube directly first
+  console.log(`Attempting to fetch video: ${videoId}`);
+  console.log(`Using options: ${YT_DLP_OPTS}`);
+  
   try {
-    const { stdout: infoJson } = await execAsync(
-      `yt-dlp ${YT_DLP_OPTS} --dump-json "https://www.youtube.com/watch?v=${videoId}"`,
-      { maxBuffer: 10 * 1024 * 1024, env: ENV_WITH_DENO }
-    );
+    const cmd = `yt-dlp ${YT_DLP_OPTS} --dump-json "https://www.youtube.com/watch?v=${videoId}"`;
+    console.log(`Running: ${cmd}`);
+    const { stdout: infoJson, stderr } = await execAsync(cmd, { maxBuffer: 10 * 1024 * 1024, env: ENV_WITH_DENO });
+    if (stderr) console.log(`stderr: ${stderr}`);
     info = JSON.parse(infoJson);
+    console.log(`Success! Video title: ${info.title}`);
   } catch (error) {
     lastError = error instanceof Error ? error.message : String(error);
-    console.log("YouTube direct failed, trying Invidious instances...");
+    console.log(`YouTube direct failed with error: ${lastError.substring(0, 500)}`);
   }
 
   // If YouTube fails, try Invidious instances
@@ -111,12 +132,18 @@ export async function downloadVideo(videoId: string, outputDir: string): Promise
   }
 
   if (!info) {
+    console.log(`All attempts failed. Last error: ${lastError}`);
+    
     // Parse the original error for user-friendly message
-    if (lastError.includes("Sign in to confirm you're not a bot") || lastError.includes("confirm you're not a bot")) {
-      throw new Error("O YouTube está bloqueando requisições deste servidor (detecção de bot). Este é um problema comum em ambientes cloud como Gitpod. Para usar o app, você precisaria: 1) Rodar localmente no seu computador, ou 2) Fornecer cookies do YouTube via arquivo cookies.txt");
+    // Check for bot detection first (most common)
+    if (lastError.includes("Sign in to confirm you're not a bot") || 
+        lastError.includes("confirm you're not a bot") ||
+        lastError.includes("bot")) {
+      throw new Error("O YouTube está bloqueando requisições deste servidor (detecção de bot). Verifique se o arquivo cookies.txt está configurado corretamente.");
     }
-    if (lastError.includes("not made this video available in your country")) {
-      throw new Error("Este vídeo não está disponível na região do servidor.");
+    if (lastError.includes("not made this video available in your country") ||
+        lastError.includes("not available in your country")) {
+      throw new Error("Este vídeo não está disponível na região do servidor. Erro original: " + lastError.substring(0, 200));
     }
     if (lastError.includes("Video unavailable") || lastError.includes("Private video")) {
       throw new Error("Vídeo indisponível ou privado. Verifique o link.");
@@ -124,7 +151,8 @@ export async function downloadVideo(videoId: string, outputDir: string): Promise
     if (lastError.includes("Sign in to confirm your age")) {
       throw new Error("Este vídeo requer verificação de idade.");
     }
-    throw new Error(`Não foi possível obter informações do vídeo. Tente outro link.`);
+    // Show the actual error for debugging
+    throw new Error(`Erro: ${lastError.substring(0, 300)}`);
   }
   
   const title = info.title || "Unknown";
